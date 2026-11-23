@@ -1,0 +1,47 @@
+#!/bin/bash
+# ping shim for capability-limited containers: times TCP connects.
+# (Real ICMP ping needs CAP_NET_RAW, which this platform drops;
+#  the original remains at /usr/bin/ping.)
+host=""
+count=4
+port="${PING_PORT:-443}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c) count="$2"; shift 2 ;;
+    -p) port="$2"; shift 2 ;;
+    -*) echo "usage: ping [-c count] [-p port] host" >&2; exit 2 ;;
+    *) host="$1"; shift ;;
+  esac
+done
+[ -n "$host" ] || { echo "usage: ping [-c count] [-p port] host" >&2; exit 2; }
+
+ip="$(getent hosts "$host" | awk '{print $1; exit}')"
+[ -n "$ip" ] || { echo "ping: cannot resolve $host" >&2; exit 1; }
+echo "TCPING $host ($ip) port $port - TCP connect timing (ICMP unavailable on this host)"
+
+sent=0; recv=0; min=999999; max=0; sum=0
+for i in $(seq 1 "$count"); do
+  sent=$((sent+1))
+  start=$(date +%s%N)
+  if timeout 3 bash -c "exec 3<>/dev/tcp/$ip/$port" 2>/dev/null; then
+    end=$(date +%s%N)
+    ms=$(awk "BEGIN{printf \"%.2f\", ($end-$start)/1000000}")
+    echo "tcp seq=$i dest=$ip:$port time=$ms ms"
+    recv=$((recv+1))
+    sum=$(awk "BEGIN{print $sum+$ms}")
+    awk "BEGIN{exit !($ms<$min)}" && min=$ms
+    awk "BEGIN{exit !($ms>$max)}" && max=$ms
+  else
+    echo "tcp seq=$i dest=$ip:$port timeout/refused"
+  fi
+  [ "$i" -lt "$count" ] && sleep 1
+done
+echo "--- $host tcp ping statistics ---"
+if [ "$recv" -gt 0 ]; then
+  avg=$(awk "BEGIN{printf \"%.2f\", $sum/$recv}")
+  loss=$(awk "BEGIN{printf \"%d\", 100*($sent-$recv)/$sent}")
+  echo "$sent sent, $recv received, $loss% loss"
+  echo "min/avg/max = $min/$avg/$max ms"
+else
+  echo "$sent sent, 0 received, 100% loss"
+fi
